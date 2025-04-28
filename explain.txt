@@ -1,0 +1,238 @@
+import cv2  # Thư viện OpenCV để xử lý video và hình ảnh
+import threading  # Thư viện cho phép chạy song song nhiều luồng
+from tkinter import *  # Thư viện GUI Tkinter
+from PIL import Image, ImageTk  # Thư viện xử lý ảnh để tích hợp OpenCV vào Tkinter
+from ultralytics import YOLO  # Import model YOLOv8 từ thư viện ultralytics
+from shapely.geometry import Point, box as shapely_box  # Thư viện Shapely để kiểm tra điểm có nằm trong hình chữ nhật không
+from tkinter.filedialog import askopenfilename  # Hộp thoại chọn file video
+
+# Load model YOLOv8n
+model = YOLO("yolov8n.pt")  # Load mô hình YOLOv8n đã huấn luyện
+
+# Giao diện Tkinter
+window = Tk()  # Tạo cửa sổ giao diện
+window.title("Đếm người vào/ra")  # Đặt tiêu đề cửa sổ
+window.geometry("900x700")  # Đặt kích thước cửa sổ
+
+label_in = Label(window, text="Số người vào: 0", font=("Arial", 16))  # Label hiển thị số người vào
+label_in.pack(pady=5)  # Đưa label lên giao diện với khoảng cách 5px
+
+label_out = Label(window, text="Số người ra: 0", font=("Arial", 16))  # Label hiển thị số người ra
+label_out.pack(pady=5)  # Đưa label lên giao diện với khoảng cách 5px
+
+camera_label = Label(window)  # Label để hiển thị video
+camera_label.pack()  # Đưa label camera vào giao diện
+
+# Các biến theo dõi
+people_in = 0  # Đếm số người vào
+people_out = 0  # Đếm số người ra
+drawing_rect = False  # Cờ kiểm tra đang vẽ vùng hay không
+selecting_in = False  # Cờ chọn vùng vào
+selecting_out = False  # Cờ chọn vùng ra
+start_point_in = None  # Điểm bắt đầu vùng vào
+end_point_in = None  # Điểm kết thúc vùng vào
+start_point_out = None  # Điểm bắt đầu vùng ra
+end_point_out = None  # Điểm kết thúc vùng ra
+rect_in_defined = False  # Cờ đã xác định vùng vào hay chưa
+rect_out_defined = False  # Cờ đã xác định vùng ra hay chưa
+inside_status_in = {}  # Dictionary lưu trạng thái trong vùng vào
+inside_status_out = {}  # Dictionary lưu trạng thái trong vùng ra
+video_path = None  # Đường dẫn video
+cap = None  # Biến đọc video
+paused = False  # Cờ tạm dừng
+running = False  # Cờ đang chạy
+
+# Hàm chọn video
+def load_video():
+    global cap, video_path, running, paused
+    video_path = askopenfilename(title="Chọn video", filetypes=[("Video Files", "*.mp4;*.avi")])  # Hộp thoại chọn video
+    if video_path:
+        if cap:
+            cap.release()  # Nếu đang mở video cũ thì giải phóng
+        cap = cv2.VideoCapture(video_path)  # Load video mới
+        running = False  # Chưa cho chạy vội
+        paused = False  # Không ở trạng thái pause
+
+# Hàm xử lý click chuột để vẽ vùng vào/ra
+def draw_rectangle(event):
+    global drawing_rect, start_point_in, end_point_in, start_point_out, end_point_out
+    global rect_in_defined, rect_out_defined
+
+    if selecting_in:  # Nếu đang chọn vùng vào
+        if not drawing_rect:  # Nếu chưa vẽ thì lưu điểm đầu
+            start_point_in = (event.x, event.y)
+            drawing_rect = True
+        else:  # Nếu đã vẽ điểm đầu rồi, lưu điểm cuối
+            end_point_in = (event.x, event.y)
+            drawing_rect = False
+            rect_in_defined = True  # Đã định nghĩa xong vùng vào
+            print(f"Vẽ vùng vào: {start_point_in} -> {end_point_in}")
+
+    elif selecting_out:  # Nếu đang chọn vùng ra
+        if not drawing_rect:
+            start_point_out = (event.x, event.y)
+            drawing_rect = True
+        else:
+            end_point_out = (event.x, event.y)
+            drawing_rect = False
+            rect_out_defined = True  # Đã định nghĩa xong vùng ra
+            print(f"Vẽ vùng ra: {start_point_out} -> {end_point_out}")
+
+camera_label.bind("<Button-1>", draw_rectangle)  # Gán sự kiện click chuột vào label camera
+
+# Nút chọn vùng vào
+def select_in_area():
+    global selecting_in, selecting_out
+    selecting_in = True  # Đặt chọn vùng vào
+    selecting_out = False  # Tắt chọn vùng ra
+    print("Chế độ chọn vùng vào")
+
+# Nút chọn vùng ra
+def select_out_area():
+    global selecting_in, selecting_out
+    selecting_in = False
+    selecting_out = True
+    print("Chế độ chọn vùng ra")
+
+# Nút start
+def start_counting():
+    global people_in, people_out, inside_status_in, inside_status_out, running, paused
+    if cap is None:  # Nếu chưa có video
+        print("Chưa chọn video!")
+        return
+    people_in = 0
+    people_out = 0
+    inside_status_in = {}
+    inside_status_out = {}
+    paused = False
+    if not running:
+        running = True
+        update_frame()  # Bắt đầu cập nhật frame liên tục
+
+# Nút tạm dừng / tiếp tục
+def toggle_pause():
+    global paused
+    if cap is None:
+        print("Chưa chọn video!")
+        return
+    paused = not paused  # Đổi trạng thái pause
+    if not paused:
+        update_frame()
+
+# Hàm cập nhật frame
+def update_frame():
+    global people_in, people_out, inside_status_in, inside_status_out, running
+
+    if not running or paused:
+        return
+
+    ret, frame = cap.read()  # Đọc 1 frame từ video
+    if not ret:  # Nếu hết video
+        print("Video đã kết thúc")
+        running = False
+        return
+
+    frame_rgb = cv2.cvtColor(frame, cv2.COLOR_BGR2RGB)  # Chuyển BGR -> RGB cho YOLO
+    results = model.track(source=frame_rgb, persist=True, tracker="bytetrack.yaml")  # Phát hiện đối tượng và tracking
+
+    frame_copy = frame.copy()  # Sao chép frame để vẽ
+
+    if results[0].boxes.id is not None:  # Nếu có đối tượng được phát hiện
+        for bbox, cls, conf, track_id in zip(
+            results[0].boxes.xyxy,
+            results[0].boxes.cls,
+            results[0].boxes.conf,
+            results[0].boxes.id,
+        ):
+            if int(cls) == 0 and conf > 0.4:  # Chỉ lấy class người (0) và độ tin cậy > 0.4
+                x1, y1, x2, y2 = map(int, bbox)  # Tọa độ bounding box
+                cx = int((x1 + x2) / 2)
+                cy = int((y1 + y2) / 2)
+
+                cv2.rectangle(frame_copy, (x1, y1), (x2, y2), (0, 255, 0), 1)  # Vẽ bounding box
+                cv2.putText(frame_copy, f"ID: {int(track_id)}", (x1, y1 - 7),
+                            cv2.FONT_HERSHEY_SIMPLEX, 0.5, (0, 255, 0), 1)  # Hiển thị ID đối tượng
+                cv2.circle(frame_copy, (cx, cy), 3, (255, 0, 0), -1)  # Vẽ tâm đối tượng
+
+                this_id = int(track_id)
+                current_point = Point(cx, cy)  # Tạo điểm
+
+                # Kiểm tra vùng vào
+                if rect_in_defined:
+                    rect_in = shapely_box(
+                        min(start_point_in[0], end_point_in[0]),
+                        min(start_point_in[1], end_point_in[1]),
+                        max(start_point_in[0], end_point_in[0]),
+                        max(start_point_in[1], end_point_in[1])
+                    )
+
+                    is_inside_in_now = rect_in.contains(current_point)  # Kiểm tra có trong vùng vào không
+
+                    if this_id in inside_status_in:
+                        was_inside_in = inside_status_in[this_id]
+
+                        if not was_inside_in and is_inside_in_now:
+                            people_in += 1  # Nếu trước ngoài mà giờ trong -> tăng người vào
+
+                    inside_status_in[this_id] = is_inside_in_now  # Cập nhật trạng thái hiện tại
+
+                # Kiểm tra vùng ra
+                if rect_out_defined:
+                    rect_out = shapely_box(
+                        min(start_point_out[0], end_point_out[0]),
+                        min(start_point_out[1], end_point_out[1]),
+                        max(start_point_out[0], end_point_out[0]),
+                        max(start_point_out[1], end_point_out[1])
+                    )
+
+                    is_inside_out_now = rect_out.contains(current_point)
+
+                    if this_id in inside_status_out:
+                        was_inside_out = inside_status_out[this_id]
+
+                        if was_inside_out and not is_inside_out_now:
+                            people_out += 1  # Nếu trước trong mà giờ ngoài -> tăng người ra
+
+                    inside_status_out[this_id] = is_inside_out_now
+
+    # Vẽ hình chữ nhật các vùng
+    if rect_in_defined:
+        cv2.rectangle(frame_copy, start_point_in, end_point_in, (0, 0, 255), 2)  # Vùng vào: màu đỏ
+    if rect_out_defined:
+        cv2.rectangle(frame_copy, start_point_out, end_point_out, (0, 255, 0), 2)  # Vùng ra: màu xanh lá
+
+    # Cập nhật giao diện
+    label_in.config(text=f"Số người vào: {people_in}")
+    label_out.config(text=f"Số người ra: {people_out}")
+
+    img = cv2.cvtColor(frame_copy, cv2.COLOR_BGR2RGB)  # Chuyển frame sang RGB
+    img = Image.fromarray(img)  # Chuyển frame sang object Image
+    imgtk = ImageTk.PhotoImage(image=img)  # Đưa vào định dạng Tkinter
+    camera_label.imgtk = imgtk
+    camera_label.configure(image=imgtk)
+
+    window.after(10, update_frame)  # Gọi lại update_frame sau 10ms
+
+# Các nút điều khiển
+load_button = Button(window, text="Load Video", font=("Arial", 14), command=load_video)  # Nút chọn video
+load_button.pack(pady=5)
+
+select_in_button = Button(window, text="Chọn ô vào", font=("Arial", 14), command=select_in_area)  # Nút chọn vùng vào
+select_in_button.pack(pady=5)
+
+select_out_button = Button(window, text="Chọn ô ra", font=("Arial", 14), command=select_out_area)  # Nút chọn vùng ra
+select_out_button.pack(pady=5)
+
+start_button = Button(window, text="Start", font=("Arial", 14), command=start_counting)  # Nút start
+start_button.pack(pady=5)
+
+pause_button = Button(window, text="Tạm dừng / Tiếp tục", font=("Arial", 14), command=toggle_pause)  # Nút pause
+pause_button.pack(pady=5)
+
+# Khởi chạy GUI
+window.mainloop()  # Chạy vòng lặp giao diện
+
+# Giải phóng tài nguyên
+if cap:
+    cap.release()  # Giải phóng camera
+cv2.destroyAllWindows()  # Đóng hết cửa sổ OpenCV
